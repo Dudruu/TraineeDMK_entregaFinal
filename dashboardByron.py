@@ -23,7 +23,6 @@ st.set_page_config(
 # =========================================================
 # AUTENTICAÇÃO (Google OIDC) — acesso restrito ao domínio da empresa júnior
 # =========================================================
-# Troque pelo domínio de e-mail institucional dos membros, ex: "ejunifei.com.br"
 DOMINIO_PERMITIDO = "byronsolutions.com"
 
 if not getattr(st.user, "is_logged_in", False):
@@ -49,17 +48,17 @@ if not email_usuario.endswith(f"@{DOMINIO_PERMITIDO.lower()}"):
     st.button(":material/logout: Sair", on_click=st.logout)
     st.stop()
 
-# Usuário autenticado e autorizado — mostra quem está logado e opção de sair
 with st.sidebar:
     st.markdown(f":material/account_circle: Logado como **{st.user.email}**")
     st.button(":material/logout: Sair", on_click=st.logout)
     st.markdown("---")
 
 # =========================================================
-# LINKS DOS CSVs (SUBSTITUA PELAS SUAS URLs PÚBLICAS DO GOOGLE SHEETS)
+# LINKS DOS CSVs
 # =========================================================
-LINK_COMERCIAL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT3_WYtPMw6Ll4S38ApBIC04x4cTzp2SPHyBzvR5Evk_gSkd1rN2oYxP86JLcdOd1cH7-B2OfOcByjz/pub?gid=1889107330&single=true&output=csv" 
+LINK_COMERCIAL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT3_WYtPMw6Ll4S38ApBIC04x4cTzp2SPHyBzvR5Evk_gSkd1rN2oYxP86JLcdOd1cH7-B2OfOcByjz/pub?gid=1889107330&single=true&output=csv"
 LINK_ACADEMICO = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT3_WYtPMw6Ll4S38ApBIC04x4cTzp2SPHyBzvR5Evk_gSkd1rN2oYxP86JLcdOd1cH7-B2OfOcByjz/pub?gid=544047503&single=true&output=csv"
+
 # =========================================================
 # FUNÇÃO DE CARGA E TRATAMENTO DOS DADOS
 # =========================================================
@@ -67,7 +66,6 @@ LINK_ACADEMICO = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT3_WYtPMw6Ll4
 def carregar_dados(url):
     df = pd.read_csv(url)
 
-    # Colunas que vêm no padrão brasileiro (vírgula decimal) -> float * 100
     colunas_taxa = [
         "Taxa de engajamento",
         "Taxa de Conversão de Perfil (%)",
@@ -85,7 +83,6 @@ def carregar_dados(url):
                 * 100
             )
 
-    # Coluna calculada: Interações Totais
     colunas_interacao = [
         "Curtidas", "Comentários", "Reposts",
         "Compartilhamentos", "Salvamentos"
@@ -110,6 +107,174 @@ def remover_outliers_iqr(df, coluna):
 
 
 # =========================================================
+# FUNÇÕES DAS MELHORIAS
+# =========================================================
+def calcular_score_composto(df):
+    """Score 0-100 combinando as 4 métricas de qualidade, normalizadas (min-max)."""
+    metricas = [
+        "Taxa de engajamento",
+        "Taxa de Conversão de Perfil (%)",
+        "Taxa de Atração",
+        "Fator de Retenção e Viralidade",
+    ]
+
+    df = df.copy()
+    for m in metricas:
+        minimo, maximo = df[m].min(), df[m].max()
+        if maximo > minimo:
+            df[f"_{m}_norm"] = (df[m] - minimo) / (maximo - minimo)
+        else:
+            df[f"_{m}_norm"] = 0.0
+
+    df["Score"] = (
+        df[[f"_{m}_norm" for m in metricas]].mean(axis=1) * 100
+    ).round(1)
+
+    return df
+
+
+def secao_leaderboard_ranqueado(df):
+    """Tabela interativa ordenada pelo Score, com barra de progresso inline."""
+    st.subheader(":material/leaderboard: Ranking geral de posts")
+    st.caption(
+        "Score composto (0–100) combinando engajamento, conversão, atração "
+        "e retenção/viralidade, normalizados entre si."
+    )
+
+    df_score = calcular_score_composto(df).sort_values("Score", ascending=False)
+
+    media_score = df_score["Score"].mean()
+    df_score["Vs. média"] = df_score["Score"] - media_score
+
+    colunas_exibir = df_score[["Post", "Tipo do post", "Score", "Vs. média"]].copy()
+
+    st.dataframe(
+        colunas_exibir,
+        column_config={
+            "Score": st.column_config.ProgressColumn(
+                "Score", min_value=0, max_value=100, format="%.1f"
+            ),
+            "Vs. média": st.column_config.NumberColumn(
+                "Vs. média do período", format="%+.1f"
+            ),
+        },
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    metricas = [
+        "Taxa de engajamento",
+        "Taxa de Conversão de Perfil (%)",
+        "Taxa de Atração",
+        "Fator de Retenção e Viralidade",
+    ]
+    q3 = df[metricas].quantile(0.75)
+    acima_q3 = (df[metricas] >= q3).sum(axis=1)
+    posts_completos = df.loc[acima_q3 >= 2, "Post"].tolist()
+
+    if posts_completos:
+        st.success(
+            ":material/verified: **Posts completos** (top 25% em 2+ métricas ao mesmo tempo): "
+            + ", ".join(posts_completos)
+        )
+
+    piores = df_score.sort_values("Score").head(3)[["Post", "Score"]]
+    with st.expander(":material/trending_down: Oportunidades de melhoria (menor score)"):
+        st.dataframe(piores, hide_index=True, use_container_width=True)
+
+
+def secao_composicao_interacoes(df):
+    st.subheader(":material/bar_chart: Composição das interações por post")
+    st.caption(
+        "Curtida, comentário, repost, compartilhamento e salvamento pesam "
+        "diferente — aqui dá pra ver a 'assinatura' de cada post."
+    )
+
+    colunas_interacao = [
+        "Curtidas", "Comentários", "Reposts", "Compartilhamentos", "Salvamentos"
+    ]
+    colunas_presentes = [c for c in colunas_interacao if c in df.columns]
+
+    df_long = df.melt(
+        id_vars=["Post", "Tipo do post"],
+        value_vars=colunas_presentes,
+        var_name="Tipo de interação",
+        value_name="Quantidade",
+    )
+
+    fig = px.bar(
+        df_long,
+        x="Post",
+        y="Quantidade",
+        color="Tipo de interação",
+        barmode="stack",
+        color_discrete_sequence=px.colors.qualitative.Set2,
+    )
+    fig.update_layout(height=500, margin=dict(t=30, b=30), xaxis_tickangle=-30)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def secao_distribuicao_formato(df):
+    st.subheader(":material/donut_large: Mix de formatos x interações geradas")
+    st.caption(
+        "Tamanho do bloco = volume de interações totais geradas por esse "
+        "formato. Ajuda a ver se o mix de conteúdo publicado bate com o "
+        "que realmente performa."
+    )
+
+    df_formato = (
+        df.groupby("Tipo do post")
+        .agg(
+            Posts=("Post", "count"),
+            Interações=("Interações Totais", "sum"),
+        )
+        .reset_index()
+    )
+
+    fig = px.treemap(
+        df_formato,
+        path=["Tipo do post"],
+        values="Interações",
+        color="Tipo do post",
+        color_discrete_sequence=PALETA,
+        custom_data=["Posts"],
+    )
+    fig.update_traces(
+        texttemplate="<b>%{label}</b><br>%{value} interações<br>%{customdata[0]} posts"
+    )
+    fig.update_layout(height=450, margin=dict(t=30, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def secao_heatmap_correlacao(df):
+    st.subheader(":material/grid_on: Correlação entre métricas")
+    st.caption(
+        "Quais indicadores andam juntos e quais são independentes. "
+        "Com poucos posts, leia como tendência, não como certeza estatística."
+    )
+
+    colunas_corr = [
+        "Visualizações", "Curtidas", "Comentários", "Visitas ao perfil",
+        "Reposts", "Compartilhamentos", "Salvamentos", "Seguidores novos",
+        "Taxa de engajamento", "Taxa de Conversão de Perfil (%)",
+        "Taxa de Atração", "Fator de Retenção e Viralidade",
+    ]
+    colunas_presentes = [c for c in colunas_corr if c in df.columns]
+
+    corr = df[colunas_presentes].corr().round(2)
+
+    fig = px.imshow(
+        corr,
+        text_auto=True,
+        color_continuous_scale=[COR_LARANJA, "#1E293B", COR_AZUL],
+        zmin=-1, zmax=1,
+        aspect="auto",
+    )
+    fig.update_layout(height=600, margin=dict(t=30, b=30))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# =========================================================
 # SIDEBAR
 # =========================================================
 st.sidebar.title(":material/tune: Configurações")
@@ -128,12 +293,11 @@ filtrar_outliers = st.sidebar.checkbox(
 
 if st.sidebar.button(":material/refresh: Atualizar dados agora"):
     st.cache_data.clear()
-    st.sidebar.success("Prontinho! Cache limpo — os dados serão recarregados na próxima consulta.")
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Byron Data Engine • Seu painel de inteligência de marketing orgânico")
 
-# Define URL e títulos de acordo com o modo escolhido
 if modo.startswith("Comercial"):
     url_dados = LINK_COMERCIAL
     titulo_principal = ":material/query_stats: Byron Data Engine — Funil Comercial"
@@ -201,7 +365,7 @@ with col4:
 st.markdown("---")
 
 # =========================================================
-# LEADERBOARD DINÂMICO (TOP PERFORMERS)
+# LEADERBOARD DINÂMICO (TOP PERFORMERS) — ORIGINAL
 # =========================================================
 st.subheader(":material/trophy: Destaques do período")
 st.caption("Os posts que mais se destacaram em cada frente — vale estudar o que funcionou neles.")
@@ -247,6 +411,13 @@ with lb3:
         """,
         unsafe_allow_html=True
     )
+
+st.markdown("---")
+
+# =========================================================
+# NOVO: RANKING GERAL COM SCORE COMPOSTO
+# =========================================================
+secao_leaderboard_ranqueado(df)
 
 st.markdown("---")
 
@@ -297,6 +468,13 @@ st.plotly_chart(fig_scatter, use_container_width=True)
 st.markdown("---")
 
 # =========================================================
+# NOVO: COMPOSIÇÃO DE INTERAÇÕES POR POST
+# =========================================================
+secao_composicao_interacoes(df)
+
+st.markdown("---")
+
+# =========================================================
 # GRÁFICO 3 — RADAR (TEIA DE ARANHA) POR FORMATO
 # =========================================================
 st.subheader(":material/radar: Radar de performance por formato")
@@ -324,7 +502,7 @@ else:
         medias = [df_formato[eixo].mean() for eixo in eixos_radar]
 
         fig_radar.add_trace(go.Scatterpolar(
-            r=medias + [medias[0]],  # fecha o polígono
+            r=medias + [medias[0]],
             theta=eixos_radar + [eixos_radar[0]],
             fill='toself',
             name=formato,
@@ -342,6 +520,13 @@ else:
     )
 
     st.plotly_chart(fig_radar, use_container_width=True)
+
+st.markdown("---")
+
+# =========================================================
+# NOVO: DISTRIBUIÇÃO POR FORMATO (TREEMAP)
+# =========================================================
+secao_distribuicao_formato(df)
 
 st.markdown("---")
 
@@ -399,6 +584,13 @@ fig_box = px.box(
 fig_box.update_layout(height=500, margin=dict(t=30, b=30), showlegend=False)
 
 st.plotly_chart(fig_box, use_container_width=True)
+
+st.markdown("---")
+
+# =========================================================
+# NOVO: HEATMAP DE CORRELAÇÃO
+# =========================================================
+secao_heatmap_correlacao(df)
 
 st.markdown("---")
 st.caption("Byron Data Engine © .")
